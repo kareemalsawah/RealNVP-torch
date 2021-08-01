@@ -1,3 +1,7 @@
+import numpy as np
+import torch
+import torch.nn as nn
+
 class Preprocessor(nn.Module):
     def __init__(self,max_val=4,alpha=0.05):
         super().__init__()
@@ -8,7 +12,7 @@ class Preprocessor(nn.Module):
         if invert:
             x = inverse_logit(x)
             x = (x-self.alpha)/(1-2*self.alpha)
-            log_det = 
+            #log_det = 
             return x, log_det
         else:
             x += uniform_dist(0,1,x.shape)  # Dequantization
@@ -17,6 +21,6 @@ class Preprocessor(nn.Module):
             x /= self.max_val
             x = (1-2*self.alpha)*x + self.alpha
             new_x = torch.log(x) - torch.log(1-x)
-            log_det = 
+            #log_det = 
 
             return x, log_det

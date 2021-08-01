@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from .preprocessor import *
 from ..utils import *
 
 class ResBlock(nn.Module):
@@ -43,52 +44,67 @@ class SimpleResnet(nn.Module):
         return x
 
 class AffineCoupling(nn.Module):
-    def __init__(self,in_channels,out_channels):
+    order_type = 0
+    def __init__(self,in_shape,use_bn=False):
+        AffineCoupling.order_type += 1
         super().__init__()
 
         self.mask = None
-        self.net = SimpleResnet(in_channels,out_channels)
+        self.use_bn = use_bn
+        self.net = SimpleResnet(in_shape[0],2)
     
     def forward(self,x,invert=False):
         assert self.mask is not None
 
         x_ = x*self.mask
-        log_s, t = torch.chunk(self.net(x_), 2, dim=1)
+        log_scale, t = torch.chunk(self.net(x_), 2, dim=1)
         
-        t = t * (1.0 - mask)
-        log_scale = log_scale * (1.0 - mask)
-        z = x * torch.exp(log_scale) + t
-        log_det_jacobian = log_scale
+        t = t * (1.0 - self.mask)
+        log_scale = log_scale * (1.0 - self.mask)
+        if invert:
+            z = (x - t) / torch.exp(log_scale)
+            log_det_jacobian = -1*log_scale
+        else:
+            z = x * torch.exp(log_scale) + t
+            log_det_jacobian = log_scale
+
         return z, log_det_jacobian
 
 class AffineCouplingCheckboard(AffineCoupling):
-    order_type = 0
-    def __init__(self,in_channels,out_channels):
-        super().__init__(in_channels,out_channels)
-        AffineCouplingCheckboard.order_type += 1
+    def __init__(self,in_shape):
+        '''
+        Parameters
+        ----------
+        in_shape: tuple[int]
+            Shape of the inputs represented as (C,H,W)
+        '''
+        super().__init__(in_shape)
+        C,H,W = in_shape
 
-        if self.order_type%2 == 0:
-            pass
-        else:
-            pass
+        self.mask = torch.ones(1,H,W)
+
+        # Inefficient way to do a checkboard pattern, but it shouldn't matter as it is only in the initialization
+        for h in range(H):
+            counter = h%2
+            for w in range(W):
+                if counter%2 == 0:
+                    self.mask[0][h][w] = 0
+                counter += 1
+
+        if AffineCoupling.order_type%2 == 0:
+            self.mask = 1 - self.mask
 
 class AffineCouplingChannel(AffineCoupling):
-    order_type = 0
-    def __init__(self,in_channels,out_channels):
-        super().__init__(in_channels,out_channels)
-        AffineCouplingChannel.order_type += 1
+    def __init__(self,in_shape):
+        super().__init__(in_shape)
+        C,H,W = in_shape
 
-        if self.order_type%2 == 0:
-            pass
-        else:
-            pass
+        self.mask = torch.ones(C,1,1)
 
-class ActNorm(nn.Module):
-    def __init__(self):
-        super().__init__()
+        self.mask[:C//2] *= 0
 
-    def forward(self,x):
-        pass
+        if AffineCoupling.order_type%2 == 0:
+            self.mask = 1 - self.mask
 
 class RealNVP(nn.Module):
     def __init__(self,):
