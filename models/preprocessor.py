@@ -27,17 +27,21 @@ class Preprocessor(nn.Module):
         '''
         if invert:
             x = torch.sigmoid(x)  # Inverse of logit
-            new_x = (x-self.alpha)/(1-2*self.alpha)
-            log_det_jac = torch.log(x) + torch.log(1-x) - np.log(1-2*self.alpha)
+            new_x = self.max_val*(x-self.alpha)/(1-2*self.alpha)
+            log_x = safe_log(x)
+            log_1_x = safe_log(1-x)
+            log_det_jac = log_x + log_1_x - np.log(1-2*self.alpha) + np.log(self.max_val)
 
             return new_x, log_det_jac
         else:
-            x = x + uniform_dist(0,1,x.shape)  # Dequantization
-
+            x = x + uniform_dist(0,1,x.shape).to(x.device)  # Dequantization
+            
             # Logit Trick
             x /= self.max_val
             x = (1-2*self.alpha)*x + self.alpha
-            new_x = torch.log(x) - torch.log(1-x)
-            log_det_jac = np.log((1-2*self.alpha)/self.max_val) - torch.log(x) - torch.log(1-x) 
+            log_x = safe_log(x)
+            log_1_x = safe_log(1-x)
+            new_x = log_x - log_1_x
+            log_det_jac = np.log((1-2*self.alpha)/self.max_val) - log_x - log_1_x
 
             return new_x, log_det_jac

@@ -84,6 +84,9 @@ class AffineCouplingCheckboard(AffineCoupling):
         self.mask = torch.ones(1,H,W)
 
         # Inefficient way to do a checkboard pattern, but it shouldn't matter as it is only in the initialization
+        # x = np.arange(8*8).reshape(8,8)
+        # print(x)
+        # x.reshape(8,2,2,2).transpose(0,3,1,2)
         for h in range(H):
             counter = h%2
             for w in range(W):
@@ -93,6 +96,9 @@ class AffineCouplingCheckboard(AffineCoupling):
 
         if AffineCoupling.order_type%2 == 0:
             self.mask = 1 - self.mask
+
+        self.mask = nn.Parameter(self.mask)
+        self.mask.requires_grad = False
 
 class AffineCouplingChannel(AffineCoupling):
     def __init__(self,in_shape):
@@ -105,6 +111,9 @@ class AffineCouplingChannel(AffineCoupling):
 
         if AffineCoupling.order_type%2 == 0:
             self.mask = 1 - self.mask
+        
+        self.mask = nn.Parameter(self.mask)
+        self.mask.requires_grad = False
 
 class FlowSequential(nn.Module):
     def __init__(self,layers):
@@ -128,14 +137,23 @@ class FlowSequential(nn.Module):
         return x, log_det_jac
 
 def squeeze(x):
-    pass
+    bs,c,sl,_ = x.shape
+    assert c==1
+
+    squeezed = x.reshape(bs,sl//2,2,sl//2,2).permute(0,1,3,2,4).reshape(bs,sl//2,sl//2,4).permute(0,3,1,2)
+    return squeezed
 
 def unsqueeze(x):
-    pass
+    bs,c,sl,_ = x.shape
+    assert c==4
+
+    unsqueezed = x.permute(0,2,3,1).reshape(bs,sl,sl,2,2).permute(0,1,3,2,4).reshape(bs,1,2*sl,2*sl)
+    return unsqueezed
 
 class RealNVP(nn.Module):
     def __init__(self,in_shape,z_dist,max_val=1):
         super().__init__()
+        self.in_shape = in_shape
         self.z_dist = z_dist
         self.is_z_simple = isinstance(self.z_dist, torch.distributions.Distribution)
         self.preprocess = Preprocessor(max_val)
@@ -170,24 +188,29 @@ class RealNVP(nn.Module):
             x, log_det_3 = self.layers_3.forward(x,invert)
         
         # Sum up log determinants
-        log_det_jac = log_det_pre + log_det_1 + log_det_2 + log_det_3
+        log_det_jac = torch.sum(log_det_pre,dim=(1,2,3))
+        log_det_jac += torch.sum(log_det_1,dim=(1,2,3))
+        log_det_jac += torch.sum(log_det_2,dim=(1,2,3))
+        log_det_jac += torch.sum(log_det_3,dim=(1,2,3))
         return x, log_det_jac
     
     def log_prob(self, x, invert=False):
+        num_dims = self.in_shape[0]*self.in_shape[1]*self.in_shape[2]
         if self.is_z_simple:
             assert invert == False
 
         x, log_det_jac = self.forward(x, invert=invert)
         if self.is_z_simple:
             log_prob_z = self.z_dist.log_prob(x)
+            log_prob_z = torch.sum(log_prob_z,dim=(1,2,3))
             log_prob_x = log_prob_z + log_det_jac
-            return log_prob_x
+            return log_prob_x/num_dims
 
         if invert:
             log_prob_x, log_det = self.z_dist.log_prob(x, invert=True)
             log_prob_z = log_prob_x + log_det + log_det_jac
-            return log_prob_z
+            return log_prob_z/num_dims
         else:
             log_prob_z, log_det = self.z_dist.log_prob(x, invert=False)
             log_prob_x = log_prob_z + log_det + log_det_jac
-            return log_prob_x
+            return log_prob_x/num_dims

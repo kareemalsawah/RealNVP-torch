@@ -22,7 +22,8 @@ class ImgsDataset(Dataset):
         return self.imgs.shape[0]
 
     def __getitem__(self, idx):
-        return self.imgs[idx], self.labels[idx]
+        img = torch.from_numpy(self.imgs[idx]).type(torch.FloatTensor)
+        return img, self.labels[idx]
 
 def get_dataloaders(dataset_name:str, batch_size:int):
     assert dataset_name in ['shapes','shapes_colored','mnist','mnist_colored']
