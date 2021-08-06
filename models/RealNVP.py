@@ -9,17 +9,16 @@ class ResBlock(nn.Module):
     def __init__(self,n_filters):
         super().__init__()
 
-        self.conv_1 = nn.Conv2d(n_filters,n_filters,kernel_size=(1,1))
-        self.conv_2 = nn.Conv2d(n_filters,n_filters,kernel_size=(3,3),padding=1)
-        self.conv_3 = nn.Conv2d(n_filters,n_filters,kernel_size=(1,1))
+        self.convs = nn.Sequential(nn.Conv2d(n_filters,n_filters,kernel_size=(1,1)),
+                                    nn.BatchNorm2d(n_filters),
+                                    nn.ReLU(),
+                                    nn.Conv2d(n_filters,n_filters,kernel_size=(3,3),padding=1),
+                                    nn.BatchNorm2d(n_filters),
+                                    nn.ReLU(),
+                                    nn.Conv2d(n_filters,n_filters,kernel_size=(1,1)))
 
-        self.relu = nn.ReLU()
-        
     def forward(self,x):
-        h = self.relu(self.conv_1(x))
-        h = self.relu(self.conv_2(h))
-        h = self.conv_3(h)
-
+        h = self.convs(x)
         return h + x
 
 class SimpleResnet(nn.Module):
@@ -30,12 +29,12 @@ class SimpleResnet(nn.Module):
         layers = []
         for i in range(n_blocks):
             layers.append(ResBlock(n_filters))
-        
+
         layers.append(nn.ReLU())
         self.layers = nn.Sequential(*layers)
-        
+
         self.conv_2 = nn.Conv2d(n_filters,n_out,kernel_size=(3,3),padding=1)
-    
+
     def forward(self,x):
         x = self.conv_1(x)
         x = self.layers(x)
@@ -52,17 +51,20 @@ class AffineCoupling(nn.Module):
         self.mask = None
         self.use_bn = use_bn
         self.net = SimpleResnet(in_channels=in_shape[0],n_out=2,n_filters=n_filters)
-    
+        self.scale = nn.Parameter(torch.zeros(1))
+        self.scale_shift = nn.Parameter(torch.zeros(1))
+
     def forward(self,x,invert=False):
         assert self.mask is not None
 
         x_ = x*self.mask
         log_scale, t = torch.chunk(self.net(x_), 2, dim=1)
-        
+        log_scale = self.scale*torch.tanh(log_scale) + self.scale_shift
+
         t = t * (1.0 - self.mask)
         log_scale = log_scale * (1.0 - self.mask)
         if invert:
-            z = (x - t) / torch.exp(log_scale)
+            z = (x - t) / (torch.exp(log_scale) + 1e-4)
             log_det_jacobian = -1*log_scale
         else:
             z = x * torch.exp(log_scale) + t
@@ -111,7 +113,7 @@ class AffineCouplingChannel(AffineCoupling):
 
         if AffineCoupling.order_type%2 == 0:
             self.mask = 1 - self.mask
-        
+
         self.mask = nn.Parameter(self.mask)
         self.mask.requires_grad = False
 
@@ -119,7 +121,7 @@ class FlowSequential(nn.Module):
     def __init__(self,layers):
         super().__init__()
         self.layers = nn.Sequential(*layers)
-    
+
     def forward(self, x, invert=False):
         log_det_jac = None
 
@@ -133,7 +135,7 @@ class FlowSequential(nn.Module):
                 log_det_jac = log_det
             else:
                 log_det_jac += log_det
-        
+
         return x, log_det_jac
 
 def squeeze(x):
@@ -161,16 +163,16 @@ class RealNVP(nn.Module):
         self.layers_1 = FlowSequential([AffineCouplingCheckboard(in_shape),
                                         AffineCouplingCheckboard(in_shape),
                                         AffineCouplingCheckboard(in_shape)])
-        
+
         scale_2_shape = (in_shape[0]*4,in_shape[1]//2,in_shape[2]//2)
         self.layers_2 = FlowSequential([AffineCouplingChannel(scale_2_shape),
                                         AffineCouplingChannel(scale_2_shape),
                                         AffineCouplingChannel(scale_2_shape)])
-        
+
         self.layers_3 = FlowSequential([AffineCouplingCheckboard(in_shape),
                                         AffineCouplingCheckboard(in_shape),
                                         AffineCouplingCheckboard(in_shape)])
-    
+
     def forward(self,x,invert=False):
         if invert:
             x, log_det_1 = self.layers_3.forward(x,invert)
@@ -186,14 +188,14 @@ class RealNVP(nn.Module):
             x, log_det_2 = self.layers_2.forward(x,invert)
             x = unsqueeze(x)
             x, log_det_3 = self.layers_3.forward(x,invert)
-        
+
         # Sum up log determinants
         log_det_jac = torch.sum(log_det_pre,dim=(1,2,3))
         log_det_jac += torch.sum(log_det_1,dim=(1,2,3))
         log_det_jac += torch.sum(log_det_2,dim=(1,2,3))
         log_det_jac += torch.sum(log_det_3,dim=(1,2,3))
         return x, log_det_jac
-    
+
     def log_prob(self, x, invert=False):
         num_dims = self.in_shape[0]*self.in_shape[1]*self.in_shape[2]
         if self.is_z_simple:

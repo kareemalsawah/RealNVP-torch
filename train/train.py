@@ -19,10 +19,11 @@ def train_epoch(model, optimizer, train_loader):
 
         optimizer.zero_grad()
         loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), 5)
         optimizer.step()
 
         train_losses.append(loss.item())
-    
+
     return train_losses
 
 def test(model, test_loader):
@@ -42,7 +43,7 @@ def test(model, test_loader):
 
             test_losses += loss.item()
             num_test += imgs.shape[0]
-    
+
     return test_losses/num_test
 
 def train(model, optimizer, n_epochs, train_loader, test_loader, plot=False):
@@ -53,13 +54,13 @@ def train(model, optimizer, n_epochs, train_loader, test_loader, plot=False):
         test_loss_epoch = test(model,test_loader)
         if e > 1:
             test_losses.append(test_loss_epoch)
-        
+
         print("Epoch {}, Test Loss: {}".format(e, test_loss_epoch))
 
         train_loss_epoch = train_epoch(model,optimizer,train_loader)
         if e > 1:
             train_losses.extend(train_loss_epoch)
-    
+
     test_loss_epoch = test(model,test_loader)
     test_losses.append(test_loss_epoch)
 
@@ -88,7 +89,10 @@ def generate_samples(model,num_samples=32,floor=True,num_to_plot=0,samples_per_r
         x, _ = model.forward(z, invert=True)
 
     if floor:
-        x = torch.clamp(torch.floor(x),min=0,max=1)
+        x = torch.clamp(torch.floor(x),min=0,max=model.preprocess.max_val-1)
+    else:
+        x -= torch.min(x)
+        x /= torch.max(x)
 
     x = x.cpu().numpy()
 
