@@ -34,6 +34,8 @@ class SimpleResnet(nn.Module):
         self.layers = nn.Sequential(*layers)
 
         self.conv_2 = nn.Conv2d(n_filters,n_out,kernel_size=(3,3),padding=1)
+        #self.conv_2.weight.data *= 0
+        #self.conv_2.bias.data *= 0
 
     def forward(self,x):
         x = self.conv_1(x)
@@ -41,6 +43,35 @@ class SimpleResnet(nn.Module):
         x = self.conv_2(x)
 
         return x
+
+class ActNorm(nn.Module):
+    def __init__(self,C):
+        super().__init__()
+        self.C = C
+
+        self.log_scale = nn.Parameter(torch.zeros((1,self.C,1,1)))
+        self.shift = nn.Parameter(torch.zeros((1,self.C,1,1)))
+
+        self.first_batch = True
+
+    def forward(self,x,invert=False):
+        if invert:
+            assert not self.first_batch
+            return (x - self.shift) * torch.exp(-1*self.log_scale), -1*self.log_scale*torch.ones(x.shape).to(self.shift.device)
+        else:
+            if self.first_batch:
+                self.log_scale.data = -1*safe_log(torch.std(x,dim=(0,2,3))+1e-4).reshape(1,self.C,1,1)
+                self.shift.data = -1*torch.mean(x,dim=(0,2,3)).reshape(1,self.C,1,1)
+
+                self.first_batch = False
+            return x * torch.exp(self.log_scale) + self.shift, self.log_scale*torch.ones(x.shape).to(self.shift.device)
+
+class one_one_conv(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self,x):
+        pass
 
 class AffineCoupling(nn.Module):
     order_type = 0
@@ -153,33 +184,66 @@ def unsqueeze(x):
     return unsqueezed
 
 class RealNVP(nn.Module):
-    def __init__(self,in_shape,z_dist,max_val=1):
+    def __init__(self,in_shape,z_dist,max_val=1,large_model=False):
         super().__init__()
         self.in_shape = in_shape
         self.z_dist = z_dist
         self.is_z_simple = isinstance(self.z_dist, torch.distributions.Distribution)
         self.preprocess = Preprocessor(max_val)
+        self.large_model = large_model
 
         self.layers_1 = FlowSequential([AffineCouplingCheckboard(in_shape),
+                                        ActNorm(1),
                                         AffineCouplingCheckboard(in_shape),
+                                        ActNorm(1),
                                         AffineCouplingCheckboard(in_shape)])
-
         scale_2_shape = (in_shape[0]*4,in_shape[1]//2,in_shape[2]//2)
         self.layers_2 = FlowSequential([AffineCouplingChannel(scale_2_shape),
+                                        ActNorm(4),
                                         AffineCouplingChannel(scale_2_shape),
-                                        AffineCouplingChannel(scale_2_shape)])
-
-        self.layers_3 = FlowSequential([AffineCouplingCheckboard(in_shape),
-                                        AffineCouplingCheckboard(in_shape),
-                                        AffineCouplingCheckboard(in_shape)])
+                                        ActNorm(4),
+                                        AffineCouplingChannel(scale_2_shape),
+                                        ActNorm(4)])
+        if self.large_model:
+            self.layers_3 = FlowSequential([AffineCouplingCheckboard(in_shape),
+                                            ActNorm(1),
+                                            AffineCouplingCheckboard(in_shape),
+                                            ActNorm(1),
+                                            AffineCouplingCheckboard(in_shape)])
+            self.layers_4 = FlowSequential([AffineCouplingChannel(scale_2_shape),
+                                            ActNorm(4),
+                                            AffineCouplingChannel(scale_2_shape),
+                                            ActNorm(4),
+                                            AffineCouplingChannel(scale_2_shape),
+                                            ActNorm(4)])
+            self.layers_5 = FlowSequential([AffineCouplingCheckboard(in_shape),
+                                            ActNorm(1),
+                                            AffineCouplingCheckboard(in_shape),
+                                            ActNorm(1),
+                                            AffineCouplingCheckboard(in_shape),
+                                            ActNorm(1),
+                                            AffineCouplingCheckboard(in_shape)])
+        else:
+            self.layers_3 = FlowSequential([AffineCouplingCheckboard(in_shape),
+                                            ActNorm(1),
+                                            AffineCouplingCheckboard(in_shape),
+                                            ActNorm(1),
+                                            AffineCouplingCheckboard(in_shape),
+                                            ActNorm(1),
+                                            AffineCouplingCheckboard(in_shape)])
 
     def forward(self,x,invert=False):
         if invert:
-            x, log_det_1 = self.layers_3.forward(x,invert)
+            if self.large_model:
+                x, log_det_5 = self.layers_5.forward(x,invert)
+                x = squeeze(x)
+                x, log_det_4 = self.layers_4.forward(x,invert)
+                x = unsqueeze(x)
+            x, log_det_3 = self.layers_3.forward(x,invert)
             x = squeeze(x)
             x, log_det_2 = self.layers_2.forward(x,invert)
             x = unsqueeze(x)
-            x, log_det_3 = self.layers_1.forward(x,invert)
+            x, log_det_1 = self.layers_1.forward(x,invert)
             x, log_det_pre = self.preprocess.forward(x,invert)
         else:
             x, log_det_pre = self.preprocess.forward(x,invert)
@@ -188,12 +252,20 @@ class RealNVP(nn.Module):
             x, log_det_2 = self.layers_2.forward(x,invert)
             x = unsqueeze(x)
             x, log_det_3 = self.layers_3.forward(x,invert)
+            if self.large_model:
+                x = squeeze(x)
+                x, log_det_4 = self.layers_4.forward(x,invert)
+                x = unsqueeze(x)
+                x, log_det_5 = self.layers_5.forward(x,invert)
 
         # Sum up log determinants
         log_det_jac = torch.sum(log_det_pre,dim=(1,2,3))
         log_det_jac += torch.sum(log_det_1,dim=(1,2,3))
         log_det_jac += torch.sum(log_det_2,dim=(1,2,3))
         log_det_jac += torch.sum(log_det_3,dim=(1,2,3))
+        if self.large_model:
+            log_det_jac += torch.sum(log_det_4,dim=(1,2,3))
+            log_det_jac += torch.sum(log_det_5,dim=(1,2,3))
         return x, log_det_jac
 
     def log_prob(self, x, invert=False):
